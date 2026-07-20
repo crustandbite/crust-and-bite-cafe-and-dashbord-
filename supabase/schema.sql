@@ -1,5 +1,5 @@
 -- Database Setup Script for WHITE HOUSE CAFE
--- Run this in the Supabase SQL Editor (https://owsgxvgauuecyffiewhn.supabase.co)
+-- Run this in the Supabase SQL Editor (https://yinhlshtdknojbaqfxax.supabase.co)
 
 -- 1. Create the orders table (exact schema without latitude/longitude columns)
 CREATE TABLE IF NOT EXISTS public.orders (
