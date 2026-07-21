@@ -1,18 +1,36 @@
 /* WHITE HOUSE CAFE - Premium Lovable Design Theme */
 
 :root {
-  --bg-primary: #000000;
-  --bg-secondary: #09090b;
-  --bg-card: #121215;
-  --accent: #dc2626; /* Crimson red */
-  --accent-hover: #b91c1c;
-  --accent-glow: rgba(220, 38, 38, 0.25);
+  --cb-bg: #080706;
+  --cb-surface: #11100E;
+  --cb-surface-elevated: #17130F;
+
+  --cb-orange: #FF5A0A;
+  --cb-orange-deep: #F0440A;
+  --cb-gold: #FFC21A;
+
+  --cb-text: #FFF8E8;
+  --cb-text-secondary: #A89F92;
+  --cb-text-muted: #6F685F;
+
+  --cb-border: rgba(255, 122, 0, 0.18);
+  --cb-border-subtle: rgba(255, 255, 255, 0.07);
+
+  --cb-orange-soft: rgba(255, 90, 10, 0.10);
+  --cb-gold-soft: rgba(255, 194, 26, 0.10);
+
+  --bg-primary: #080706;
+  --bg-secondary: #11100E;
+  --bg-card: #17130F;
+  --accent: #FF5A0A; /* Crust & Bite Pizza Orange */
+  --accent-hover: #FF7A1A;
+  --accent-glow: rgba(255, 90, 10, 0.25);
   
-  --text-primary: #ffffff;
-  --text-secondary: #a1a1aa;
-  --text-muted: #52525b;
-  --border: #27272a;
-  --border-focus: #3f3f46;
+  --text-primary: #FFF8E8;
+  --text-secondary: #A89F92;
+  --text-muted: #6F685F;
+  --border: rgba(255, 122, 0, 0.18);
+  --border-focus: rgba(255, 122, 0, 0.50);
   
   --success: #22c55e;
   --success-glow: rgba(34, 197, 94, 0.15);
@@ -1013,10 +1031,10 @@ body {
 
 /* --- MOBILE ORDER DASHBOARD --- */
 .admin-dashboard-container {
-  max-width: 800px;
+  max-width: 900px;
   margin: 0 auto;
   padding: 1.5rem 1rem;
-  background-color: #000000;
+  background-color: var(--cb-bg);
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -1035,9 +1053,9 @@ body {
   font-size: 0.65rem;
   font-weight: 700;
   text-transform: uppercase;
-  color: var(--text-secondary);
-  border: 1px solid var(--border);
-  background-color: rgba(255, 255, 255, 0.03);
+  color: var(--cb-orange);
+  border: 1px solid var(--cb-border);
+  background-color: var(--cb-orange-soft);
   padding: 0.35rem 0.75rem;
   border-radius: 50px;
   display: inline-flex;
@@ -1049,14 +1067,14 @@ body {
 .dashboard-main-title {
   font-size: 1.85rem;
   font-weight: 800;
-  color: #fff;
+  color: var(--cb-text);
   letter-spacing: -0.02em;
   line-height: 1.2;
 }
 
 .dashboard-subtitle {
   font-size: 0.85rem;
-  color: var(--text-secondary);
+  color: var(--cb-text-secondary);
   line-height: 1.4;
 }
 
@@ -1074,24 +1092,24 @@ body {
 }
 
 .dashboard-stat-card {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: var(--radius-md);
+  background: var(--cb-surface);
+  border: 1px solid var(--cb-border);
+  border-radius: 20px;
   padding: 1.25rem;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   min-height: 100px;
   position: relative;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
 }
 
 .dashboard-stat-card:hover {
-  transform: translateY(-2px);
-  border-color: rgba(255, 255, 255, 0.1);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  transform: translateY(-1px);
+  border-color: rgba(255, 122, 0, 0.35);
+  box-shadow: 0 8px 24px rgba(255, 90, 10, 0.08);
 }
 
 .stat-card-top {
@@ -1105,7 +1123,7 @@ body {
   font-size: 0.65rem;
   font-weight: 700;
   text-transform: uppercase;
-  color: var(--text-secondary);
+  color: var(--cb-text-secondary);
   letter-spacing: 0.05em;
   line-height: 1.2;
   max-width: 80%;
@@ -1118,8 +1136,8 @@ body {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background-color: rgba(255, 255, 255, 0.03);
-  color: var(--text-secondary);
+  background-color: var(--cb-orange-soft);
+  color: var(--cb-orange);
 }
 
 .stat-card-icon-wrapper.pending {
@@ -1135,14 +1153,14 @@ body {
 .stat-card-val {
   font-size: 1.75rem;
   font-weight: 800;
-  color: #fff;
+  color: var(--cb-text);
   margin-top: 0.5rem;
   line-height: 1;
 }
 
 .stat-card-desc {
   font-size: 0.65rem;
-  color: var(--text-muted);
+  color: var(--cb-text-muted);
   margin-top: 0.25rem;
 }
 
@@ -1161,11 +1179,11 @@ body {
 
 .search-input-field {
   width: 100%;
-  background-color: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border);
-  color: #fff;
+  background-color: #0D0C0A;
+  border: 1px solid var(--cb-border);
+  color: var(--cb-text);
   padding: 0.7rem 1rem 0.7rem 2.5rem;
-  border-radius: 12px;
+  border-radius: 14px;
   font-family: var(--font-sans);
   font-size: 0.85rem;
   outline: none;
@@ -1173,8 +1191,8 @@ body {
 }
 
 .search-input-field:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 10px var(--accent-glow);
+  border-color: rgba(255, 122, 0, 0.50);
+  box-shadow: 0 0 12px rgba(255, 90, 10, 0.15);
 }
 
 .search-input-icon {
@@ -1182,7 +1200,7 @@ body {
   left: 0.9rem;
   top: 50%;
   transform: translateY(-50%);
-  color: var(--text-muted);
+  color: var(--cb-text-muted);
 }
 
 .refresh-action-row {
@@ -1206,9 +1224,9 @@ body {
 }
 
 .filter-slider-btn {
-  background-color: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
+  background-color: var(--cb-surface);
+  border: 1px solid var(--cb-border-subtle);
+  color: var(--cb-text-secondary);
   font-size: 0.75rem;
   font-weight: 600;
   padding: 0.45rem 1rem;
@@ -1219,13 +1237,15 @@ body {
 }
 
 .filter-slider-btn:hover {
-  border-color: var(--border-focus);
+  border-color: var(--cb-orange);
+  color: var(--cb-text);
 }
 
 .filter-slider-btn.active {
-  background-color: #fff;
-  color: #000;
-  border-color: #fff;
+  background-color: rgba(255, 90, 10, 0.14);
+  color: #FFF8E8;
+  border-color: rgba(255, 90, 10, 0.50);
+  box-shadow: 0 0 12px rgba(255, 90, 10, 0.15);
 }
 
 /* Orders Feed */
@@ -1237,17 +1257,22 @@ body {
 }
 
 .order-glass-card {
-  background: rgba(20, 20, 20, 0.65);
+  background: var(--cb-surface);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--cb-border);
+  border-radius: 20px;
   padding: 1.25rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
   transition: transform 0.2s ease, border-color 0.2s ease;
+}
+
+.order-glass-card:hover {
+  border-color: rgba(255, 122, 0, 0.35);
+  transform: translateY(-1px);
 }
 
 .order-glass-card:hover {

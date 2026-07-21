@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react'
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import {
   ShoppingBag, Plus, Minus, Trash2, MapPin, Search, Phone,
   Bell, Clock, CheckCircle,
-  ArrowRight, Lock, X, ExternalLink, Flame, Star
+  ArrowRight, Lock, X, ExternalLink, Flame, Star, LogOut, Users, Settings as SettingsIcon
 } from 'lucide-react'
 import {
   supabase
@@ -356,6 +356,349 @@ export default function App() {
   const [loadingCancelled, setLoadingCancelled] = useState(false)
   const [cancelledPage, setCancelledPage] = useState(0)
   const [hasMoreCancelled, setHasMoreCancelled] = useState(true)
+
+  // --- ADMIN NAVIGATION TAB STATE ---
+  const [adminTab, setAdminTab] = useState<'dashboard' | 'orders' | 'products' | 'customers' | 'settings'>('dashboard')
+
+  // --- PRODUCTS MANAGEMENT STATES ---
+  const [adminProducts, setAdminProducts] = useState<MenuItem[]>(MENU_ITEMS)
+  const [productSearch, setProductSearch] = useState('')
+  const [productCategoryFilter, setProductCategoryFilter] = useState('All')
+
+  // --- DYNAMIC CATEGORIES GENERATED FROM LIVE PRODUCTS DATABASE ---
+  const dynamicCategories = useMemo(() => {
+    if (!adminProducts || adminProducts.length === 0) return CATEGORIES
+    const set = new Set<string>()
+    adminProducts.forEach(p => {
+      if (p.category) set.add(p.category)
+    })
+    const cats = Array.from(set)
+    return ['All', ...cats]
+  }, [adminProducts])
+
+  // --- FETCH PRODUCTS FROM SUPABASE ON MOUNT ---
+  useEffect(() => {
+    let isMounted = true
+    const fetchProducts = async () => {
+      const client = supabase
+      if (!client) return
+      try {
+        const { data, error } = await client
+          .from('products')
+          .select('*')
+          .order('id', { ascending: true })
+
+        if (!error && data && data.length > 0 && isMounted) {
+          setAdminProducts(data as MenuItem[])
+        }
+      } catch (err: any) {
+        console.error('Error fetching products:', err)
+      }
+    }
+
+    fetchProducts()
+  }, [])
+
+  // --- SUPABASE REALTIME SUBSCRIPTION FOR PRODUCTS ---
+  useEffect(() => {
+    const client = supabase
+    if (!client) return
+
+    const channel = client
+      .channel('dashboard-products-realtime-channel')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'products' },
+        (payload) => {
+          if (payload.eventType === 'UPDATE' && payload.new) {
+            const updated = payload.new as MenuItem
+            setAdminProducts(prev =>
+              prev.map(p => (p.id === updated.id ? { ...p, ...updated } : p))
+            )
+          } else if (payload.eventType === 'INSERT' && payload.new) {
+            const inserted = payload.new as MenuItem
+            setAdminProducts(prev => {
+              if (prev.some(p => p.id === inserted.id)) {
+                return prev.map(p => (p.id === inserted.id ? { ...p, ...inserted } : p))
+              }
+              return [...prev, inserted].sort((a, b) => a.id - b.id)
+            })
+          } else if (payload.eventType === 'DELETE' && payload.old) {
+            const deletedId = (payload.old as any).id
+            setAdminProducts(prev => prev.filter(p => p.id !== deletedId))
+          }
+        }
+      )
+      .subscribe()
+
+    return () => {
+      client.removeChannel(channel)
+    }
+  }, [])
+
+  const handleToggleProductAvailability = async (id: number) => {
+    const currentProd = adminProducts.find(p => p.id === id)
+    const targetAvailability = currentProd ? !currentProd.availability : false
+
+    // Optimistic UI update
+    setAdminProducts(prev => prev.map(p => p.id === id ? { ...p, availability: targetAvailability } : p))
+
+    const client = supabase
+    if (!client) return
+
+    try {
+      const { error } = await client
+        .from('products')
+        .update({ availability: targetAvailability })
+        .eq('id', id)
+
+      if (error) {
+        console.error('Error updating product availability in Supabase:', error)
+        // Revert optimistic update on error
+        setAdminProducts(prev => prev.map(p => p.id === id ? { ...p, availability: !targetAvailability } : p))
+        setStatusToast('Failed to update availability: ' + error.message)
+        setTimeout(() => setStatusToast(null), 3000)
+      } else {
+        setStatusToast(`Product ${targetAvailability ? 'marked Available' : 'marked Out of Stock'}`)
+        setTimeout(() => setStatusToast(null), 3000)
+      }
+    } catch (err: any) {
+      console.error('Error updating product availability:', err)
+      setAdminProducts(prev => prev.map(p => p.id === id ? { ...p, availability: !targetAvailability } : p))
+    }
+  }
+
+  // --- CUSTOMERS DIRECTORY STATES & HISTORICAL DATA ---
+  const [customerOrders, setCustomerOrders] = useState<SupabaseOrder[]>([])
+  const [loadingCustomerHistory, setLoadingCustomerHistory] = useState<boolean>(false)
+  const [customerHistoryError, setCustomerHistoryError] = useState<string | null>(null)
+  const [customerSearch, setCustomerSearch] = useState<string>('')
+
+  // Fetch ALL historical orders for Customers directory
+  const fetchCustomerHistory = useCallback(async () => {
+    const client = supabase
+    if (!client) return
+    setLoadingCustomerHistory(true)
+    setCustomerHistoryError(null)
+    try {
+      const { data, error } = await client
+        .from('orders')
+        .select('*')
+        .order('created_at', { ascending: false })
+
+      if (error) {
+        console.error('[SUPABASE CUSTOMERS FETCH ERROR]', error.message)
+        setCustomerHistoryError(error.message)
+      } else {
+        setCustomerOrders(data || [])
+      }
+    } catch (err: any) {
+      console.error('[SUPABASE CUSTOMERS EXCEPTION]', err)
+      setCustomerHistoryError(err?.message || 'Failed to load customer history')
+    } finally {
+      setLoadingCustomerHistory(false)
+    }
+  }, [])
+
+  // Fetch customer history on mount & subscribe to Realtime for orders table
+  useEffect(() => {
+    const client = supabase
+    if (!client || !adminSession) return
+
+    fetchCustomerHistory()
+
+    const channel = client
+      .channel('dashboard-customers-realtime-channel')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'orders' },
+        () => {
+          fetchCustomerHistory()
+        }
+      )
+      .subscribe()
+
+    return () => {
+      client.removeChannel(channel)
+    }
+  }, [adminSession, fetchCustomerHistory])
+
+  // Aggregated Customer Profiles from ALL historical orders grouped by unique Phone Number
+  const customerProfiles = useMemo(() => {
+    interface CustomerProfile {
+      phone: string
+      rawPhone: string
+      name: string
+      totalOrders: number
+      totalSpent: number
+      lastOrderDate: string
+      lastAddress: string
+      mapsLink: string | null
+      classification: 'NEW' | 'RETURNING' | 'LOYAL' | 'VIP'
+    }
+
+    const map = new Map<string, CustomerProfile>()
+
+    customerOrders.forEach(ord => {
+      const rawPhone = (ord.phone || '').trim()
+      const normalizedPhone = rawPhone.replace(/\D/g, '') || rawPhone || 'UNKNOWN'
+
+      const ordDate = ord.created_at || new Date().toISOString()
+      const ordTotal = Number(ord.total) || 0
+
+      // Address resolution: prefer manual_address if available, else maps_link / GPS pin
+      let addr = 'N/A'
+      if (ord.manual_address && ord.manual_address.trim()) {
+        addr = ord.manual_address.trim()
+      } else if (ord.location_type === 'gps' || ord.maps_link) {
+        addr = 'GPS Location Pin'
+      }
+
+      const existing = map.get(normalizedPhone)
+
+      if (existing) {
+        existing.totalOrders += 1
+        existing.totalSpent += ordTotal
+
+        if (new Date(ordDate) > new Date(existing.lastOrderDate)) {
+          existing.lastOrderDate = ordDate
+          if (ord.customer_name && ord.customer_name.trim()) {
+            existing.name = ord.customer_name.trim()
+          }
+          if (addr !== 'N/A') existing.lastAddress = addr
+          if (ord.maps_link) existing.mapsLink = ord.maps_link
+        }
+      } else {
+        map.set(normalizedPhone, {
+          phone: normalizedPhone !== 'UNKNOWN' ? rawPhone : 'N/A',
+          rawPhone: rawPhone,
+          name: (ord.customer_name && ord.customer_name.trim()) ? ord.customer_name.trim() : 'Guest Customer',
+          totalOrders: 1,
+          totalSpent: ordTotal,
+          lastOrderDate: ordDate,
+          lastAddress: addr,
+          mapsLink: ord.maps_link || null,
+          classification: 'NEW'
+        })
+      }
+    })
+
+    // Assign classification badges based on totalOrders
+    const list = Array.from(map.values()).map(c => {
+      let classification: 'NEW' | 'RETURNING' | 'LOYAL' | 'VIP' = 'NEW'
+      if (c.totalOrders >= 10) classification = 'VIP'
+      else if (c.totalOrders >= 5) classification = 'LOYAL'
+      else if (c.totalOrders >= 2) classification = 'RETURNING'
+      return { ...c, classification }
+    })
+
+    return list
+  }, [customerOrders])
+
+  // Filtered Customer Profiles based on search input
+  const filteredCustomers = useMemo(() => {
+    if (!customerSearch.trim()) return customerProfiles
+    const query = customerSearch.toLowerCase().trim()
+    return customerProfiles.filter(c =>
+      c.name.toLowerCase().includes(query) ||
+      c.phone.toLowerCase().includes(query) ||
+      c.rawPhone.toLowerCase().includes(query)
+    )
+  }, [customerProfiles, customerSearch])
+
+  // Analytics Metrics for Customers Header
+  const customerAnalytics = useMemo(() => {
+    const totalCustomers = customerProfiles.length
+    const returningCustomers = customerProfiles.filter(c => c.totalOrders >= 2).length
+    const customerRevenue = customerOrders.reduce((sum, ord) => sum + (Number(ord.total) || 0), 0)
+
+    return {
+      totalCustomers,
+      returningCustomers,
+      customerRevenue
+    }
+  }, [customerProfiles, customerOrders])
+
+  // --- STORE ORDERING AVAILABILITY SETTINGS STATES ---
+  const [acceptingOrders, setAcceptingOrders] = useState<boolean>(true)
+  const [updatingStoreSettings, setUpdatingStoreSettings] = useState<boolean>(false)
+
+  // Fetch store settings from Supabase on mount
+  useEffect(() => {
+    let isMounted = true
+    const fetchStoreSettings = async () => {
+      const client = supabase
+      if (!client) return
+      try {
+        const { data, error } = await client
+          .from('store_settings')
+          .select('*')
+          .eq('id', 1)
+          .single()
+
+        if (!error && data && isMounted) {
+          setAcceptingOrders((data as any).accepting_orders)
+        }
+      } catch (err) {
+        console.error('Error fetching store_settings:', err)
+      }
+    }
+
+    fetchStoreSettings()
+  }, [])
+
+  // Subscribe to store_settings Realtime updates
+  useEffect(() => {
+    const client = supabase
+    if (!client) return
+
+    const channel = client
+      .channel('dashboard-store-settings-realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'store_settings' },
+        (payload) => {
+          if (payload.new && typeof (payload.new as any).accepting_orders === 'boolean') {
+            setAcceptingOrders((payload.new as any).accepting_orders)
+          }
+        }
+      )
+      .subscribe()
+
+    return () => {
+      client.removeChannel(channel)
+    }
+  }, [])
+
+  const handleToggleAcceptingOrders = async () => {
+    const nextState = !acceptingOrders
+    const client = supabase
+    if (!client) return
+
+    setUpdatingStoreSettings(true)
+    try {
+      const { error } = await client
+        .from('store_settings')
+        .update({ accepting_orders: nextState, updated_at: new Date().toISOString() })
+        .eq('id', 1)
+
+      if (error) {
+        console.error('Failed to update store_settings in Supabase:', error)
+        setStatusToast('Failed to update store status: ' + error.message)
+        setTimeout(() => setStatusToast(null), 3000)
+      } else {
+        setAcceptingOrders(nextState)
+        setStatusToast(nextState ? 'Online ordering enabled' : 'Online ordering paused')
+        setTimeout(() => setStatusToast(null), 3000)
+      }
+    } catch (err: any) {
+      console.error('Error updating store_settings:', err)
+      setStatusToast('Error updating status: ' + (err?.message || 'Unknown error'))
+      setTimeout(() => setStatusToast(null), 3000)
+    } finally {
+      setUpdatingStoreSettings(false)
+    }
+  }
 
   // Webhook and connection integrations from build environment variables
   const n8nWebhookUrl = import.meta.env.VITE_N8N_WEBHOOK_URL || ''
@@ -1846,32 +2189,98 @@ export default function App() {
             /* Admin Dashboard Layout */
             <div className="admin-dashboard-container">
               {/* Header */}
-              <header className="dashboard-header-block">
-                <div className="brand-badge-pill">
-                  <ShoppingBag size={10} /> WHITE HOUSE CAFE
-                </div>
-                <h1 className="dashboard-main-title">Mobile Order Dashboard</h1>
-                <p className="dashboard-subtitle" style={{ marginBottom: '1.25rem' }}>
-                  Optimized for phone use with tap-to-call and tap-to-open Google Maps.
-                </p>
+              <header className="dashboard-header-block" style={{ marginBottom: '1.5rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.25rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
+                    <img
+                      src="/images/logo.png"
+                      alt="Crust & Bite Logo"
+                      style={{ height: '48px', width: 'auto', borderRadius: '10px', objectFit: 'contain' }}
+                      onError={(e) => { (e.target as HTMLElement).style.display = 'none' }}
+                    />
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <h1 className="dashboard-main-title" style={{ fontSize: '1.4rem', fontWeight: 800, color: 'var(--cb-text)', margin: 0, letterSpacing: '-0.02em', fontFamily: 'var(--font-serif)' }}>
+                          CRUST & BITE
+                        </h1>
+                        <span style={{ fontSize: '0.62rem', fontWeight: 800, letterSpacing: '0.08em', padding: '0.15rem 0.5rem', borderRadius: '50px', background: 'var(--cb-orange-soft)', color: 'var(--cb-orange)', border: '1px solid var(--cb-border)' }}>
+                          OPERATIONS
+                        </span>
+                      </div>
+                      <p className="dashboard-subtitle" style={{ color: 'var(--cb-text-secondary)', fontSize: '0.78rem', marginTop: '0.15rem' }}>
+                        Orders • Inventory • Customers • Analytics
+                      </p>
+                    </div>
+                  </div>
 
-                {/* Dashboard Timeframe Filter Toggle governed by one filter button */}
-                <div className="filter-slider" style={{ margin: '0 auto', padding: '0.2rem', borderRadius: '8px', background: 'rgba(255,255,255,0.02)', justifyContent: 'center', width: 'fit-content' }}>
-                  {(['Daily', 'Weekly', 'Monthly'] as const).map(range => (
-                    <button
-                      key={range}
-                      className={`filter-slider-btn ${analyticsFilter === range ? 'active' : ''}`}
-                      style={{ padding: '0.4rem 1.25rem', fontSize: '0.8rem', height: 'auto', borderRadius: '6px' }}
-                      onClick={() => setAnalyticsFilter(range)}
-                    >
-                      {range}
-                    </button>
-                  ))}
+                  <button
+                    className="btn btn-secondary"
+                    style={{ padding: '0.45rem 1rem', borderRadius: '50px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.4rem', border: '1px solid var(--cb-border)', background: 'var(--cb-surface-elevated)', color: 'var(--cb-text-secondary)', height: '36px' }}
+                    onClick={handleAdminLogout}
+                  >
+                    <LogOut size={13} /> Log Out
+                  </button>
+                </div>
+
+                {/* Main Navigation Tabs */}
+                <div className="filter-slider" style={{ display: 'flex', gap: '0.5rem', width: '100%', overflowX: 'auto', background: 'transparent', padding: 0 }}>
+                  {[
+                    { id: 'dashboard', label: 'Dashboard', icon: ShoppingBag },
+                    { id: 'orders', label: 'Orders', icon: Clock },
+                    { id: 'products', label: 'Products', icon: Flame },
+                    { id: 'customers', label: 'Customers', icon: Users },
+                    { id: 'settings', label: 'Settings', icon: SettingsIcon }
+                  ].map(tab => {
+                    const isActive = adminTab === tab.id
+                    const Icon = tab.icon
+                    return (
+                      <button
+                        key={tab.id}
+                        onClick={() => setAdminTab(tab.id as any)}
+                        style={{
+                          padding: '0.65rem 1.35rem',
+                          borderRadius: '14px',
+                          background: isActive ? 'rgba(255, 90, 10, 0.14)' : 'var(--cb-surface)',
+                          color: isActive ? 'var(--cb-text)' : 'var(--cb-text-secondary)',
+                          border: isActive ? '1px solid rgba(255, 90, 10, 0.50)' : '1px solid var(--cb-border-subtle)',
+                          boxShadow: isActive ? '0 0 15px rgba(255, 90, 10, 0.15)' : 'none',
+                          fontWeight: 700,
+                          fontSize: '0.85rem',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '0.45rem',
+                          transition: 'all 0.2s ease',
+                          whiteSpace: 'nowrap'
+                        }}
+                      >
+                        <Icon size={14} style={{ color: isActive ? 'var(--cb-orange)' : 'var(--cb-text-muted)' }} />
+                        {tab.label}
+                      </button>
+                    )
+                  })}
                 </div>
               </header>
 
-              {/* Stats Cards Section (4 synchronized KPI cards) */}
-              <section className="stats-grid-container" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem' }}>
+              {/* DASHBOARD TAB VIEW */}
+              {adminTab === 'dashboard' && (
+                <>
+                  {/* Dashboard Timeframe Filter Toggle */}
+                  <div className="filter-slider" style={{ margin: '0 auto 1.5rem auto', padding: '0.2rem', borderRadius: '8px', background: 'rgba(255,255,255,0.02)', justifyContent: 'center', width: 'fit-content' }}>
+                    {(['Daily', 'Weekly', 'Monthly'] as const).map(range => (
+                      <button
+                        key={range}
+                        className={`filter-slider-btn ${analyticsFilter === range ? 'active' : ''}`}
+                        style={{ padding: '0.4rem 1.25rem', fontSize: '0.8rem', height: 'auto', borderRadius: '6px' }}
+                        onClick={() => setAnalyticsFilter(range)}
+                      >
+                        {range}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Stats Cards Section (4 synchronized KPI cards) */}
+                  <section className="stats-grid-container" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem' }}>
                 {/* Card 1: Total Orders */}
                 <div className="dashboard-stat-card">
                   <div className="stat-card-top">
@@ -2132,7 +2541,7 @@ export default function App() {
                                       <span style={{ fontWeight: '500', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '140px' }}>
                                         {idx + 1}. {item.name}
                                       </span>
-                                      <span style={{ fontWeight: 'bold', color: 'var(--accent)' }}>{item.quantity} sold</span>
+                                      <span style={{ fontWeight: 'bold', color: 'var(--cb-gold)' }}>{item.quantity} sold</span>
                                     </div>
                                     <div style={{ width: '100%', height: '6px', borderRadius: '3px', backgroundColor: 'rgba(255,255,255,0.03)', overflow: 'hidden' }}>
                                       <div 
@@ -2140,8 +2549,8 @@ export default function App() {
                                           width: `${widthPct}%`, 
                                           height: '100%', 
                                           borderRadius: '3px', 
-                                          backgroundColor: 'var(--accent)', 
-                                          opacity: 0.85,
+                                          background: 'linear-gradient(90deg, #FF5A0A, #FFC21A)', 
+                                          opacity: 0.9,
                                           transition: 'width 0.5s ease' 
                                         }} 
                                       />
@@ -2157,267 +2566,677 @@ export default function App() {
                   </div>
                 )}
               </section>
+            </>
+            )}
 
-              {/* Search & Filters */}
-              <section className="control-bar">
-                <div className="search-wrapper">
-                  <Search size={16} className="search-input-icon" />
-                  <input
-                    type="text"
-                    className="search-input-field"
-                    placeholder="Search by ID, name, or phone number..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                  />
-                </div>
-
-                {/* Segregation Queue Tabs */}
-                <div className="filter-slider" style={{ display: 'flex', gap: '0.4rem', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '0.75rem', marginBottom: '0.75rem', width: '100%', overflowX: 'auto' }}>
-                  {[
-                    { key: 'active', label: 'Active Orders' },
-                    { key: 'delivered', label: 'Delivered Orders' },
-                    { key: 'cancelled', label: 'Cancelled Orders' }
-                  ].map(tab => {
-                    const isActive = orderQueue === tab.key
-                    let countText = ''
-                    if (tab.key === 'active') countText = ` (${orders.length})`
-                    return (
-                      <button
-                        key={tab.key}
-                        className={`filter-slider-btn ${isActive ? 'active' : ''}`}
-                        style={{ flex: '1', whiteSpace: 'nowrap', minWidth: '115px', textAlign: 'center', justifyContent: 'center' }}
-                        onClick={() => setOrderQueue(tab.key as any)}
-                      >
-                        {tab.label}{countText}
-                      </button>
-                    )
-                  })}
-                </div>
-
-                {/* Sub-filters slider for Active Orders queue */}
-                {orderQueue === 'active' && (
-                  <div className="filter-slider" style={{ width: '100%', marginBottom: '0.75rem' }}>
-                    {['All Active', 'Pending', 'Preparing', 'Out for Delivery'].map(filter => (
-                      <button
-                        key={filter}
-                        className={`filter-slider-btn ${activeStatusFilter === filter ? 'active' : ''}`}
-                        onClick={() => setActiveStatusFilter(filter as any)}
-                      >
-                        {filter}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                {/* Refresh/Logout row */}
-                <div className="refresh-action-row">
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <button
-                      className="btn btn-secondary"
-                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.75rem', height: '32px' }}
-                      onClick={() => {
-                        if (orderQueue === 'active') fetchOrders(true)
-                        else if (orderQueue === 'delivered') fetchDeliveredOrders(true)
-                        else if (orderQueue === 'cancelled') fetchCancelledOrders(true)
-                      }}
-                      disabled={loadingQueue}
-                    >
-                      {loadingQueue ? 'Refreshing...' : 'Refresh Feed'}
-                    </button>
-                    <button
-                      className="btn btn-secondary"
-                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.75rem', height: '32px' }}
-                      onClick={() => {
-                        window.history.pushState({}, '', '/customer')
-                        setView('customer')
-                      }}
-                    >
-                      Menu <ExternalLink size={12} />
-                    </button>
-                  </div>
-                  <button
-                    className="btn btn-secondary"
-                    style={{ padding: '0.4rem 0.8rem', fontSize: '0.75rem', height: '32px', color: 'var(--danger)', borderColor: 'rgba(239, 68, 68, 0.2)' }}
-                    onClick={handleAdminLogout}
-                  >
-                    Log Out
-                  </button>
-                </div>
-              </section>
-
-              {/* Live Orders Feed */}
-              <section className="orders-feed-container">
-                {loadingQueue ? (
-                  // Loading skeleton (3 cards)
-                  Array.from({ length: 3 }).map((_, idx) => (
-                    <div key={idx} className="order-glass-card" style={{ gap: '0.75rem' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                        <div className="skeleton-box" style={{ width: '80px', height: '16px' }} />
-                        <div className="skeleton-box" style={{ width: '60px', height: '16px' }} />
-                      </div>
-                      <div className="skeleton-box" style={{ width: '150px', height: '20px' }} />
-                      <div className="skeleton-box" style={{ width: '100px', height: '14px' }} />
-                      <div className="skeleton-box" style={{ width: '100%', height: '80px', borderRadius: '8px' }} />
-                      <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        <div className="skeleton-box" style={{ width: '60px', height: '22px', borderRadius: '50px' }} />
-                        <div className="skeleton-box" style={{ width: '80px', height: '22px', borderRadius: '50px' }} />
-                      </div>
+              {/* ORDERS TAB VIEW */}
+              {adminTab === 'orders' && (
+                <>
+                  {/* Search & Filters */}
+                  <section className="control-bar">
+                    <div className="search-wrapper">
+                      <Search size={16} className="search-input-icon" />
+                      <input
+                        type="text"
+                        className="search-input-field"
+                        placeholder="Search by ID, name, or phone number..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                      />
                     </div>
-                  ))
-                ) : filteredOrders.length === 0 ? (
-                  <div className="empty-state-block">
-                    <ShoppingBag size={36} style={{ color: 'var(--text-muted)' }} />
-                    <p style={{ fontWeight: '500' }}>No orders found</p>
-                    <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                      There are no orders matching your current search or filter criteria.
-                    </p>
+
+                    {/* Segregation Queue Tabs */}
+                    <div className="filter-slider" style={{ display: 'flex', gap: '0.4rem', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '0.75rem', marginBottom: '0.75rem', width: '100%', overflowX: 'auto' }}>
+                      {[
+                        { key: 'active', label: 'Active Orders' },
+                        { key: 'delivered', label: 'Delivered Orders' },
+                        { key: 'cancelled', label: 'Cancelled Orders' }
+                      ].map(tab => {
+                        const isActive = orderQueue === tab.key
+                        let countText = ''
+                        if (tab.key === 'active') countText = ` (${orders.length})`
+                        return (
+                          <button
+                            key={tab.key}
+                            className={`filter-slider-btn ${isActive ? 'active' : ''}`}
+                            style={{ flex: '1', whiteSpace: 'nowrap', minWidth: '115px', textAlign: 'center', justifyContent: 'center' }}
+                            onClick={() => setOrderQueue(tab.key as any)}
+                          >
+                            {tab.label}{countText}
+                          </button>
+                        )
+                      })}
+                    </div>
+
+                    {/* Sub-filters slider for Active Orders queue */}
+                    {orderQueue === 'active' && (
+                      <div className="filter-slider" style={{ width: '100%', marginBottom: '0.75rem' }}>
+                        {['All Active', 'Pending', 'Preparing', 'Out for Delivery'].map(filter => (
+                          <button
+                            key={filter}
+                            className={`filter-slider-btn ${activeStatusFilter === filter ? 'active' : ''}`}
+                            onClick={() => setActiveStatusFilter(filter as any)}
+                          >
+                            {filter}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Refresh/Logout row */}
+                    <div className="refresh-action-row">
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <button
+                          className="btn btn-secondary"
+                          style={{ padding: '0.4rem 0.8rem', fontSize: '0.75rem', height: '32px' }}
+                          onClick={() => {
+                            if (orderQueue === 'active') fetchOrders(true)
+                            else if (orderQueue === 'delivered') fetchDeliveredOrders(true)
+                            else if (orderQueue === 'cancelled') fetchCancelledOrders(true)
+                          }}
+                          disabled={loadingQueue}
+                        >
+                          {loadingQueue ? 'Refreshing...' : 'Refresh Feed'}
+                        </button>
+                        <button
+                          className="btn btn-secondary"
+                          style={{ padding: '0.4rem 0.8rem', fontSize: '0.75rem', height: '32px' }}
+                          onClick={() => {
+                            window.open('https://crust-bite-site.vercel.app/', '_blank', 'noopener,noreferrer')
+                          }}
+                        >
+                          Menu <ExternalLink size={12} />
+                        </button>
+                      </div>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ padding: '0.4rem 0.8rem', fontSize: '0.75rem', height: '32px', color: 'var(--danger)', borderColor: 'rgba(239, 68, 68, 0.2)' }}
+                        onClick={handleAdminLogout}
+                      >
+                        Log Out
+                      </button>
+                    </div>
+                  </section>
+
+                  {/* Live Orders Feed */}
+                  <section className="orders-feed-container">
+                    {loadingQueue ? (
+                      // Loading skeleton (3 cards)
+                      Array.from({ length: 3 }).map((_, idx) => (
+                        <div key={idx} className="order-glass-card" style={{ gap: '0.75rem' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <div className="skeleton-box" style={{ width: '80px', height: '16px' }} />
+                            <div className="skeleton-box" style={{ width: '60px', height: '16px' }} />
+                          </div>
+                          <div className="skeleton-box" style={{ width: '150px', height: '20px' }} />
+                          <div className="skeleton-box" style={{ width: '100px', height: '14px' }} />
+                          <div className="skeleton-box" style={{ width: '100%', height: '80px', borderRadius: '8px' }} />
+                          <div style={{ display: 'flex', gap: '0.5rem' }}>
+                            <div className="skeleton-box" style={{ width: '60px', height: '22px', borderRadius: '50px' }} />
+                            <div className="skeleton-box" style={{ width: '80px', height: '22px', borderRadius: '50px' }} />
+                          </div>
+                        </div>
+                      ))
+                    ) : filteredOrders.length === 0 ? (
+                      <div className="empty-state-block">
+                        <ShoppingBag size={36} style={{ color: 'var(--text-muted)' }} />
+                        <p style={{ fontWeight: '500' }}>No orders found</p>
+                        <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                          There are no orders matching your current search or filter criteria.
+                        </p>
+                      </div>
+                    ) : (
+                      filteredOrders.map(order => {
+                        const status = order.order_status?.toLowerCase() || 'pending'
+                        const pStatus = order.payment_status?.toLowerCase() || 'pending'
+                        const timeString = new Date(order.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                        const dateString = new Date(order.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' })
+                        
+                        return (
+                          <div key={order.id} className="order-glass-card" onClick={() => setSelectedOrder(order)}>
+                            <div className="order-card-row-top">
+                              <span className="order-card-id">Order #{order.id}</span>
+                              <span className="order-card-time">{timeString} • {dateString}</span>
+                            </div>
+
+                            <div className="order-card-cust-info" onClick={(e) => e.stopPropagation()}>
+                              <span className="order-card-name">{order.customer_name}</span>
+                              <a href={`tel:${order.phone}`} className="order-card-phone-link">
+                                <Phone size={12} /> {order.phone}
+                              </a>
+                            </div>
+
+                            {order.location_type === 'manual' && order.manual_address ? (
+                              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.35rem', lineHeight: '1.3' }}>
+                                <div style={{ fontWeight: '600', color: 'var(--text-muted)', fontSize: '0.65rem', textTransform: 'uppercase', marginBottom: '2px' }}>Delivery Address</div>
+                                <div style={{ whiteSpace: 'pre-line', wordBreak: 'break-word' }}>{order.manual_address}</div>
+                              </div>
+                            ) : order.location_type === 'gps' && order.latitude !== null && order.latitude !== undefined && order.longitude !== null && order.longitude !== undefined ? (
+                              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
+                                Coordinates: {order.latitude.toFixed(6)}, {order.longitude.toFixed(6)}
+                              </div>
+                            ) : null}
+
+                            {/* Order items summary parser */}
+                            {renderOrderSummary(order)}
+
+                            <div className="order-card-badges">
+                              {/* Payment status badge */}
+                              <span className={`badge badge-${pStatus === 'paid' ? 'paid' : pStatus === 'failed' ? 'failed' : 'pending'}`}>
+                                {pStatus === 'paid' ? 'Paid' : pStatus === 'failed' ? 'Failed' : 'Payment: Pending'}
+                              </span>
+                              
+                              {/* Order status badge */}
+                              <span className={`badge badge-${status === 'preparing' ? 'preparing' : status === 'out_for_delivery' ? 'ready' : status === 'delivered' ? 'delivered' : status === 'cancelled' ? 'cancelled' : 'new'}`}>
+                                {status === 'out_for_delivery' ? 'Out for Delivery' : status}
+                              </span>
+                            </div>
+
+                            {/* Order Action Buttons & Phone / Maps buttons */}
+                            <div className="order-card-action-bar" onClick={(e) => e.stopPropagation()}>
+                              <a href={`tel:${order.phone}`} className="action-btn-dashboard secondary-dark" style={{ textDecoration: 'none' }}>
+                                <Phone size={14} /> Call Customer
+                              </a>
+                              
+                              {order.location_type === 'gps' && order.maps_link && (
+                                <button
+                                  className="action-btn-dashboard secondary-dark"
+                                  onClick={() => {
+                                    window.open(order.maps_link!, '_blank')
+                                  }}
+                                >
+                                  <MapPin size={14} /> Google Maps
+                                </button>
+                              )}
+                            </div>
+
+                            {/* Workflow Transitions */}
+                            <div className="order-card-action-bar" onClick={(e) => e.stopPropagation()} style={{ borderTop: '1px solid rgba(255, 255, 255, 0.05)', paddingTop: '0.75rem' }}>
+                              {status === 'pending' && (
+                                <>
+                                  <button
+                                    className="action-btn-dashboard success-green"
+                                    onClick={() => handleUpdateStatus(order.id, 'order', 'preparing')}
+                                  >
+                                    Accept Order
+                                  </button>
+                                  <button
+                                    className="action-btn-dashboard secondary-dark"
+                                    style={{ color: 'var(--danger)', borderColor: 'rgba(239, 68, 68, 0.2)' }}
+                                    onClick={() => handleUpdateStatus(order.id, 'order', 'cancelled')}
+                                  >
+                                    Cancel Order
+                                  </button>
+                                </>
+                              )}
+
+                              {status === 'preparing' && (
+                                <>
+                                  <button
+                                    className="action-btn-dashboard success-green"
+                                    onClick={() => handleUpdateStatus(order.id, 'order', 'out_for_delivery')}
+                                  >
+                                    Mark Out for Delivery
+                                  </button>
+                                  <button
+                                    className="action-btn-dashboard secondary-dark"
+                                    style={{ color: 'var(--danger)', borderColor: 'rgba(239, 68, 68, 0.2)' }}
+                                    onClick={() => handleUpdateStatus(order.id, 'order', 'cancelled')}
+                                  >
+                                    Cancel Order
+                                  </button>
+                                </>
+                              )}
+
+                              {status === 'out_for_delivery' && (
+                                <button
+                                  className="action-btn-dashboard success-green"
+                                  style={{ gridColumn: 'span 2' }}
+                                  onClick={() => handleUpdateStatus(order.id, 'order', 'delivered')}
+                                >
+                                  Mark Delivered
+                                </button>
+                              )}
+
+                              {status === 'delivered' && (
+                                <div className="status-text-badge" style={{ gridColumn: 'span 2', color: 'var(--success)', justifyContent: 'center' }}>
+                                  ✅ Delivered
+                                </div>
+                              )}
+
+                              {status === 'cancelled' && (
+                                <div className="status-text-badge" style={{ gridColumn: 'span 2', color: 'var(--danger)', justifyContent: 'center' }}>
+                                  ❌ Cancelled
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })
+                    )}
+                  </section>
+
+                  {filteredOrders.length > 0 && queueHasMore && (
+                    <div style={{ display: 'flex', justifyContent: 'center', marginTop: '1.5rem', marginBottom: '2.5rem' }}>
+                      <button
+                        className="btn btn-secondary"
+                        style={{ padding: '0.6rem 1.5rem', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
+                        onClick={() => {
+                          if (orderQueue === 'active') fetchOrders(false)
+                          else if (orderQueue === 'delivered') fetchDeliveredOrders(false)
+                          else if (orderQueue === 'cancelled') fetchCancelledOrders(false)
+                        }}
+                        disabled={loadingQueue}
+                      >
+                        {loadingQueue ? 'Loading...' : 'Load More Orders'}
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* PRODUCTS TAB VIEW */}
+              {adminTab === 'products' && (
+                <section className="products-admin-section" style={{ width: '100%', marginTop: '1rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.25rem' }}>
+                    <div>
+                      <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#fff', margin: 0 }}>Products & Menu Management</h2>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Manage menu item availability, prices, and catalog</span>
+                    </div>
                   </div>
-                ) : (
-                  filteredOrders.map(order => {
-                    const status = order.order_status?.toLowerCase() || 'pending'
-                    const pStatus = order.payment_status?.toLowerCase() || 'pending'
-                    const timeString = new Date(order.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                    const dateString = new Date(order.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' })
-                    
-                    return (
-                      <div key={order.id} className="order-glass-card" onClick={() => setSelectedOrder(order)}>
-                        <div className="order-card-row-top">
-                          <span className="order-card-id">Order #{order.id}</span>
-                          <span className="order-card-time">{timeString} • {dateString}</span>
-                        </div>
 
-                        <div className="order-card-cust-info" onClick={(e) => e.stopPropagation()}>
-                          <span className="order-card-name">{order.customer_name}</span>
-                          <a href={`tel:${order.phone}`} className="order-card-phone-link">
-                            <Phone size={12} /> {order.phone}
-                          </a>
-                        </div>
+                  {/* Search and Category Filter */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.5rem' }}>
+                    <div className="search-wrapper">
+                      <Search size={16} className="search-input-icon" />
+                      <input
+                        type="text"
+                        className="search-input-field"
+                        placeholder="Search product by name or description..."
+                        value={productSearch}
+                        onChange={(e) => setProductSearch(e.target.value)}
+                      />
+                    </div>
 
-                        {order.location_type === 'manual' && order.manual_address ? (
-                          <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.35rem', lineHeight: '1.3' }}>
-                            <div style={{ fontWeight: '600', color: 'var(--text-muted)', fontSize: '0.65rem', textTransform: 'uppercase', marginBottom: '2px' }}>Delivery Address</div>
-                            <div style={{ whiteSpace: 'pre-line', wordBreak: 'break-word' }}>{order.manual_address}</div>
+                    <div className="filter-slider" style={{ display: 'flex', gap: '0.4rem', width: '100%', overflowX: 'auto', paddingBottom: '0.25rem' }}>
+                      {dynamicCategories.map((cat: string) => (
+                        <button
+                          key={cat}
+                          className={`filter-slider-btn ${productCategoryFilter === cat ? 'active' : ''}`}
+                          style={{ whiteSpace: 'nowrap' }}
+                          onClick={() => setProductCategoryFilter(cat)}
+                        >
+                          {cat}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Products Grid */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1rem' }}>
+                    {adminProducts
+                      .filter((item: MenuItem) => {
+                        const matchesCat = productCategoryFilter === 'All' || item.category === productCategoryFilter
+                        const matchesSearch = !productSearch.trim() || item.name.toLowerCase().includes(productSearch.toLowerCase()) || item.description.toLowerCase().includes(productSearch.toLowerCase())
+                        return matchesCat && matchesSearch
+                      })
+                      .map((item: MenuItem) => (
+                        <div key={item.id} className="order-glass-card" style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '0.75rem' }}>
+                          <div style={{ display: 'flex', gap: '0.85rem' }}>
+                            {item.image && (
+                              <img src={item.image} alt={item.name} style={{ width: '65px', height: '65px', borderRadius: '10px', objectFit: 'cover' }} />
+                            )}
+                            <div style={{ flex: 1 }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: item.veg ? '#22c55e' : '#ef4444', display: 'inline-block' }} />
+                                <span style={{ fontWeight: 700, fontSize: '0.95rem', color: '#fff' }}>{item.name}</span>
+                              </div>
+                              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.2rem', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{item.description}</div>
+                              <div style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--cb-gold)', marginTop: '0.35rem' }}>₹{item.price}</div>
+                            </div>
                           </div>
-                        ) : order.location_type === 'gps' && order.latitude !== null && order.latitude !== undefined && order.longitude !== null && order.longitude !== undefined ? (
-                          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.3rem' }}>
-                            Coordinates: {order.latitude.toFixed(6)}, {order.longitude.toFixed(6)}
-                          </div>
-                        ) : null}
 
-                        {/* Order items summary parser */}
-                        {renderOrderSummary(order)}
-
-                        <div className="order-card-badges">
-                          {/* Payment status badge */}
-                          <span className={`badge badge-${pStatus === 'paid' ? 'paid' : pStatus === 'failed' ? 'failed' : 'pending'}`}>
-                            {pStatus === 'paid' ? 'Paid' : pStatus === 'failed' ? 'Failed' : 'Payment: Pending'}
-                          </span>
-                          
-                          {/* Order status badge */}
-                          <span className={`badge badge-${status === 'preparing' ? 'preparing' : status === 'out_for_delivery' ? 'ready' : status === 'delivered' ? 'delivered' : status === 'cancelled' ? 'cancelled' : 'new'}`}>
-                            {status === 'out_for_delivery' ? 'Out for Delivery' : status}
-                          </span>
-                        </div>
-
-                        {/* Order Action Buttons & Phone / Maps buttons */}
-                        <div className="order-card-action-bar" onClick={(e) => e.stopPropagation()}>
-                          <a href={`tel:${order.phone}`} className="action-btn-dashboard secondary-dark" style={{ textDecoration: 'none' }}>
-                            <Phone size={14} /> Call Customer
-                          </a>
-                          
-                          {order.location_type === 'gps' && order.maps_link && (
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '0.65rem' }}>
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Status: <strong style={{ color: item.availability ? '#22c55e' : '#ef4444' }}>{item.availability ? 'Available' : 'Out of Stock'}</strong></span>
                             <button
-                              className="action-btn-dashboard secondary-dark"
-                              onClick={() => {
-                                window.open(order.maps_link!, '_blank')
+                              onClick={() => handleToggleProductAvailability(item.id)}
+                              style={{
+                                padding: '0.35rem 0.85rem',
+                                borderRadius: '50px',
+                                fontSize: '0.75rem',
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                                border: item.availability ? '1px solid rgba(239,68,68,0.3)' : '1px solid rgba(34,197,94,0.3)',
+                                background: item.availability ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)',
+                                color: item.availability ? '#ef4444' : '#22c55e'
                               }}
                             >
-                              <MapPin size={14} /> Google Maps
+                              {item.availability ? 'Mark Out of Stock' : 'Mark Available'}
                             </button>
-                          )}
+                          </div>
                         </div>
+                      ))}
+                  </div>
+                </section>
+              )}
 
-                        {/* Workflow Transitions */}
-                        <div className="order-card-action-bar" onClick={(e) => e.stopPropagation()} style={{ borderTop: '1px solid rgba(255, 255, 255, 0.05)', paddingTop: '0.75rem' }}>
-                          {status === 'pending' && (
-                            <>
-                              <button
-                                className="action-btn-dashboard success-green"
-                                onClick={() => handleUpdateStatus(order.id, 'order', 'preparing')}
-                              >
-                                Accept Order
-                              </button>
-                              <button
-                                className="action-btn-dashboard secondary-dark"
-                                style={{ color: 'var(--danger)', borderColor: 'rgba(239, 68, 68, 0.2)' }}
-                                onClick={() => handleUpdateStatus(order.id, 'order', 'cancelled')}
-                              >
-                                Cancel Order
-                              </button>
-                            </>
-                          )}
+              {/* CUSTOMERS TAB VIEW */}
+              {adminTab === 'customers' && (
+                <section className="customers-admin-section" style={{ width: '100%', marginTop: '1rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '1.25rem' }}>
+                    <div>
+                      <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#fff', margin: 0 }}>Customer Directory</h2>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Automated customer analytics, order history, and contact details</span>
+                    </div>
+                    <button
+                      className="btn btn-secondary"
+                      style={{ padding: '0.45rem 0.9rem', fontSize: '0.75rem', height: '34px', borderRadius: '50px' }}
+                      onClick={() => fetchCustomerHistory()}
+                      disabled={loadingCustomerHistory}
+                    >
+                      {loadingCustomerHistory ? 'Refreshing...' : 'Refresh Customers'}
+                    </button>
+                  </div>
 
-                          {status === 'preparing' && (
-                            <>
-                              <button
-                                className="action-btn-dashboard success-green"
-                                onClick={() => handleUpdateStatus(order.id, 'order', 'out_for_delivery')}
-                              >
-                                Mark Out for Delivery
-                              </button>
-                              <button
-                                className="action-btn-dashboard secondary-dark"
-                                style={{ color: 'var(--danger)', borderColor: 'rgba(239, 68, 68, 0.2)' }}
-                                onClick={() => handleUpdateStatus(order.id, 'order', 'cancelled')}
-                              >
-                                Cancel Order
-                              </button>
-                            </>
-                          )}
-
-                          {status === 'out_for_delivery' && (
-                            <button
-                              className="action-btn-dashboard success-green"
-                              style={{ gridColumn: 'span 2' }}
-                              onClick={() => handleUpdateStatus(order.id, 'order', 'delivered')}
-                            >
-                              Mark Delivered
-                            </button>
-                          )}
-
-                          {status === 'delivered' && (
-                            <div className="status-text-badge" style={{ gridColumn: 'span 2', color: 'var(--success)', justifyContent: 'center' }}>
-                              ✅ Delivered
-                            </div>
-                          )}
-
-                          {status === 'cancelled' && (
-                            <div className="status-text-badge" style={{ gridColumn: 'span 2', color: 'var(--danger)', justifyContent: 'center' }}>
-                              ❌ Cancelled
-                            </div>
-                          )}
+                  {/* Top Customer Analytics Cards (3 summary cards) */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
+                    {/* Card 1: Total Customers */}
+                    <div className="dashboard-stat-card">
+                      <div className="stat-card-top">
+                        <span className="stat-card-lbl">TOTAL CUSTOMERS</span>
+                        <div className="stat-card-icon-wrapper">
+                          <Users size={14} />
                         </div>
                       </div>
-                    )
-                  })
-                )}
-              </section>
+                      <div className="stat-card-val">
+                        {customerAnalytics.totalCustomers}
+                      </div>
+                    </div>
 
-              {filteredOrders.length > 0 && queueHasMore && (
-                <div style={{ display: 'flex', justifyContent: 'center', marginTop: '1.5rem', marginBottom: '2.5rem' }}>
-                  <button
-                    className="btn btn-secondary"
-                    style={{ padding: '0.6rem 1.5rem', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.1)' }}
-                    onClick={() => {
-                      if (orderQueue === 'active') fetchOrders(false)
-                      else if (orderQueue === 'delivered') fetchDeliveredOrders(false)
-                      else if (orderQueue === 'cancelled') fetchCancelledOrders(false)
-                    }}
-                    disabled={loadingQueue}
-                  >
-                    {loadingQueue ? 'Loading...' : 'Load More Orders'}
-                  </button>
-                </div>
+                    {/* Card 2: Returning Customers */}
+                    <div className="dashboard-stat-card">
+                      <div className="stat-card-top">
+                        <span className="stat-card-lbl">RETURNING CUSTOMERS</span>
+                        <div className="stat-card-icon-wrapper pending">
+                          <Clock size={14} />
+                        </div>
+                      </div>
+                      <div className="stat-card-val">
+                        {customerAnalytics.returningCustomers}
+                      </div>
+                    </div>
+
+                    {/* Card 3: Customer Revenue */}
+                    <div className="dashboard-stat-card">
+                      <div className="stat-card-top">
+                        <span className="stat-card-lbl">CUSTOMER REVENUE</span>
+                        <div className="stat-card-icon-wrapper">
+                          <span style={{ fontSize: '0.85rem', fontWeight: 'bold' }}>₹</span>
+                        </div>
+                      </div>
+                      <div className="stat-card-val">
+                        ₹{customerAnalytics.customerRevenue.toLocaleString('en-IN')}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Search Bar */}
+                  <div className="search-wrapper" style={{ marginBottom: '1.5rem' }}>
+                    <Search size={16} className="search-input-icon" />
+                    <input
+                      type="text"
+                      className="search-input-field"
+                      placeholder="Search by customer name or phone number..."
+                      value={customerSearch}
+                      onChange={(e) => setCustomerSearch(e.target.value)}
+                    />
+                  </div>
+
+                  {/* Customer Directory Feed / Grid */}
+                  {loadingCustomerHistory ? (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1rem' }}>
+                      {Array.from({ length: 3 }).map((_, idx) => (
+                        <div key={idx} className="order-glass-card" style={{ gap: '0.75rem' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <div className="skeleton-box" style={{ width: '100px', height: '18px' }} />
+                            <div className="skeleton-box" style={{ width: '60px', height: '18px', borderRadius: '50px' }} />
+                          </div>
+                          <div className="skeleton-box" style={{ width: '120px', height: '14px' }} />
+                          <div className="skeleton-box" style={{ width: '100%', height: '60px', borderRadius: '8px' }} />
+                          <div className="skeleton-box" style={{ width: '100%', height: '32px', borderRadius: '8px' }} />
+                        </div>
+                      ))}
+                    </div>
+                  ) : customerHistoryError ? (
+                    <div className="empty-state-block">
+                      <Users size={36} style={{ color: 'var(--danger)' }} />
+                      <p style={{ fontWeight: '500', color: 'var(--danger)' }}>Failed to load customer history</p>
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{customerHistoryError}</p>
+                      <button className="btn btn-secondary" style={{ marginTop: '0.75rem' }} onClick={() => fetchCustomerHistory()}>
+                        Retry
+                      </button>
+                    </div>
+                  ) : customerProfiles.length === 0 ? (
+                    <div className="empty-state-block">
+                      <Users size={36} style={{ color: 'var(--text-muted)' }} />
+                      <p style={{ fontWeight: '500' }}>No customers yet</p>
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                        Customer profiles will automatically appear here when orders are placed.
+                      </p>
+                    </div>
+                  ) : filteredCustomers.length === 0 ? (
+                    <div className="empty-state-block">
+                      <Search size={36} style={{ color: 'var(--text-muted)' }} />
+                      <p style={{ fontWeight: '500' }}>No customers found</p>
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                        Try a different customer name or phone number.
+                      </p>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1rem' }}>
+                      {filteredCustomers.map((c, idx) => {
+                        const dateFormatted = new Date(c.lastOrderDate).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })
+                        
+                        let badgeBg = 'rgba(59, 130, 246, 0.15)'
+                        let badgeColor = '#3b82f6'
+                        let badgeBorder = 'rgba(59, 130, 246, 0.3)'
+
+                        if (c.classification === 'VIP') {
+                          badgeBg = 'rgba(234, 179, 8, 0.15)'
+                          badgeColor = '#eab308'
+                          badgeBorder = 'rgba(234, 179, 8, 0.3)'
+                        } else if (c.classification === 'LOYAL') {
+                          badgeBg = 'rgba(255, 140, 0, 0.15)'
+                          badgeColor = '#ff8c00'
+                          badgeBorder = 'rgba(255, 140, 0, 0.3)'
+                        } else if (c.classification === 'RETURNING') {
+                          badgeBg = 'rgba(168, 85, 247, 0.15)'
+                          badgeColor = '#a855f7'
+                          badgeBorder = 'rgba(168, 85, 247, 0.3)'
+                        }
+
+                        return (
+                          <div key={idx} className="order-glass-card" style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                              <div>
+                                <div style={{ fontWeight: 700, fontSize: '1rem', color: '#fff' }}>{c.name}</div>
+                                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>{c.phone}</div>
+                              </div>
+                              <span
+                                style={{
+                                  padding: '0.2rem 0.6rem',
+                                  borderRadius: '50px',
+                                  fontSize: '0.68rem',
+                                  fontWeight: 800,
+                                  letterSpacing: '0.04em',
+                                  background: badgeBg,
+                                  color: badgeColor,
+                                  border: `1px solid ${badgeBorder}`
+                                }}
+                              >
+                                {c.classification}
+                              </span>
+                            </div>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', background: 'rgba(255,255,255,0.02)', padding: '0.65rem', borderRadius: '8px', fontSize: '0.75rem', border: '1px solid rgba(255,255,255,0.04)' }}>
+                              <div>
+                                <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.65rem', textTransform: 'uppercase' }}>TOTAL ORDERS</span>
+                                <strong style={{ color: '#fff', fontSize: '0.9rem' }}>{c.totalOrders} {c.totalOrders === 1 ? 'Order' : 'Orders'}</strong>
+                              </div>
+                              <div>
+                                <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.65rem', textTransform: 'uppercase' }}>TOTAL SPENT</span>
+                                <strong style={{ color: 'var(--accent)', fontSize: '0.9rem' }}>₹{c.totalSpent.toLocaleString('en-IN')}</strong>
+                              </div>
+                            </div>
+
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                              <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem', display: 'block', textTransform: 'uppercase' }}>LAST ORDER DATE</span>
+                              <span style={{ color: '#fff' }}>{dateFormatted}</span>
+                            </div>
+
+                            {c.lastAddress && c.lastAddress !== 'N/A' && (
+                              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                <span style={{ color: 'var(--text-muted)', fontSize: '0.65rem', display: 'block', textTransform: 'uppercase' }}>LAST DELIVERY ADDRESS</span>
+                                <span style={{ wordBreak: 'break-word', whiteSpace: 'pre-line', lineHeight: '1.3' }}>{c.lastAddress}</span>
+                              </div>
+                            )}
+
+                            <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.25rem', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '0.65rem' }}>
+                              {c.phone && c.phone !== 'N/A' && (
+                                <a href={`tel:${c.rawPhone || c.phone}`} className="action-btn-dashboard secondary-dark" style={{ textDecoration: 'none', flex: 1, justifyContent: 'center' }}>
+                                  <Phone size={14} /> Call Customer
+                                </a>
+                              )}
+                              {c.mapsLink && (
+                                <a href={c.mapsLink} target="_blank" rel="noopener noreferrer" className="action-btn-dashboard secondary-dark" style={{ textDecoration: 'none', flex: 1, justifyContent: 'center' }}>
+                                  <MapPin size={14} /> Google Maps
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {/* SETTINGS TAB VIEW */}
+              {adminTab === 'settings' && (
+                <section className="settings-section" style={{ width: '100%', marginTop: '1rem' }}>
+                  <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid rgba(255, 255, 255, 0.08)', borderRadius: '16px', padding: '1.75rem' }}>
+                    <h2 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#fff', marginBottom: '1.75rem' }}>System Settings</h2>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                      {/* Order Availability Header & Switch */}
+                      <div>
+                        <div style={{ fontSize: '0.75rem', fontWeight: 700, letterSpacing: '0.08em', color: 'var(--cb-orange)', textTransform: 'uppercase', marginBottom: '0.5rem' }}>
+                          ORDER AVAILABILITY
+                        </div>
+
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginTop: '0.75rem' }}>
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.4rem' }}>
+                              <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#fff', margin: 0 }}>Accepting Orders</h3>
+                              <span
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '0.35rem',
+                                  padding: '0.25rem 0.65rem',
+                                  borderRadius: '50px',
+                                  fontSize: '0.72rem',
+                                  fontWeight: 700,
+                                  background: acceptingOrders ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                                  color: acceptingOrders ? '#22c55e' : '#ef4444',
+                                  border: acceptingOrders ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid rgba(239, 68, 68, 0.3)'
+                                }}
+                              >
+                                <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: acceptingOrders ? '#22c55e' : '#ef4444' }} />
+                                {acceptingOrders ? 'STORE OPEN' : 'STORE CLOSED'}
+                              </span>
+                            </div>
+                            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: 0 }}>
+                              {acceptingOrders ? 'Customers can currently place orders.' : 'Online ordering is currently paused.'}
+                            </p>
+                          </div>
+
+                          {/* Toggle Switch */}
+                          <button
+                            type="button"
+                            onClick={handleToggleAcceptingOrders}
+                            disabled={updatingStoreSettings}
+                            style={{
+                              position: 'relative',
+                              width: '74px',
+                              height: '38px',
+                              borderRadius: '50px',
+                              background: acceptingOrders ? 'linear-gradient(135deg, #ff8c00, #ff6c00)' : 'rgba(255, 255, 255, 0.1)',
+                              border: acceptingOrders ? '1px solid #ff8c00' : '1px solid rgba(255, 255, 255, 0.2)',
+                              cursor: updatingStoreSettings ? 'wait' : 'pointer',
+                              transition: 'all 0.3s ease',
+                              display: 'flex',
+                              alignItems: 'center',
+                              padding: '4px'
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: '30px',
+                                height: '30px',
+                                borderRadius: '50%',
+                                background: acceptingOrders ? '#000' : '#fff',
+                                transform: acceptingOrders ? 'translateX(36px)' : 'translateX(0px)',
+                                transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: '0.65rem',
+                                fontWeight: 900,
+                                color: acceptingOrders ? '#ff8c00' : '#000'
+                              }}
+                            >
+                              {acceptingOrders ? 'ON' : 'OFF'}
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Order Timings */}
+                      <div style={{ borderTop: '1px solid rgba(255, 255, 255, 0.05)', paddingTop: '1.25rem' }}>
+                        <div style={{ fontSize: '0.75rem', fontWeight: 700, letterSpacing: '0.08em', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.35rem' }}>
+                          ORDER TIMINGS
+                        </div>
+                        <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#fff' }}>
+                          2:00 PM – 2:00 AM
+                        </div>
+                      </div>
+
+                      {/* Attachment 2 Restoration: Large Bottom Orange Button */}
+                      <button
+                        type="button"
+                        onClick={handleToggleAcceptingOrders}
+                        disabled={updatingStoreSettings}
+                        style={{
+                          marginTop: '0.5rem',
+                          width: '100%',
+                          padding: '0.9rem',
+                          borderRadius: '50px',
+                          background: 'linear-gradient(135deg, #ff8c00, #ff6c00)',
+                          color: '#000',
+                          fontWeight: 700,
+                          fontSize: '0.95rem',
+                          border: 'none',
+                          cursor: updatingStoreSettings ? 'wait' : 'pointer',
+                          boxShadow: '0 4px 20px rgba(255, 140, 0, 0.3)',
+                          transition: 'all 0.2s ease'
+                        }}
+                      >
+                        {acceptingOrders ? 'Pause Online Orders' : 'Start Accepting Orders'}
+                      </button>
+                    </div>
+                  </div>
+                </section>
               )}
 
               {/* Status change Toast alert */}
