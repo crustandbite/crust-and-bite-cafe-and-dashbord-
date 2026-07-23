@@ -33,8 +33,11 @@ interface MenuItem {
 interface CartItem {
   item: MenuItem
   quantity: number
-  activePrice: number
+  activePrice?: number
+  selectedSize?: string
+  selectedAddons?: string[]
 }
+
 
 interface SupabaseOrder {
   id: string
@@ -1404,7 +1407,7 @@ export default function App() {
   }
 
   // Total Calculations
-  const subtotal = cart.reduce((sum, item) => sum + (item.activePrice * item.quantity), 0)
+  const subtotal = cart.reduce((sum, item) => sum + ((item.activePrice ?? item.item.price) * item.quantity), 0)
   const packagingFee = cart.length > 0 ? 5 : 0
   const total = subtotal + packagingFee
 
@@ -1599,11 +1602,27 @@ export default function App() {
           {foodItems.map((cartItem: any, idx: number) => {
             const qty = cartItem.quantity || 1
             const name = cartItem.item?.name || 'Item'
-            const price = cartItem.activePrice || cartItem.item?.price || 0
+            const price = cartItem.activePrice ?? cartItem.item?.price ?? 0
+            const sizeValue = cartItem.selectedSize
+            const hasSize = typeof sizeValue === 'string' && sizeValue.trim() !== ''
+            const hasAddons = Array.isArray(cartItem.selectedAddons) && cartItem.selectedAddons.length > 0
+
             return (
-              <div key={idx} className="order-summary-item">
-                <span>{qty}x {name}</span>
-                <span>₹{price * qty}</span>
+              <div key={idx} style={{ marginBottom: '0.6rem' }}>
+                <div className="order-summary-item" style={{ marginBottom: '0.15rem' }}>
+                  <span>{qty}x {name}</span>
+                  <span>₹{price * qty}</span>
+                </div>
+                {hasSize && (
+                  <div style={{ paddingLeft: '1.25rem', fontSize: '0.72rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
+                    Size: {sizeValue === 'R' ? 'Regular' : sizeValue === 'M' ? 'Medium' : sizeValue}
+                  </div>
+                )}
+                {hasAddons && cartItem.selectedAddons.map((addon: string, aIdx: number) => (
+                  <div key={aIdx} style={{ paddingLeft: '1.25rem', fontSize: '0.72rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
+                    + {addon}
+                  </div>
+                ))}
               </div>
             )
           })}
@@ -1951,7 +1970,7 @@ export default function App() {
                             <span>{cartItem.item.name}</span>
                           </h4>
                           <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '0.15rem' }}>
-                            ₹{cartItem.activePrice} x {cartItem.quantity}
+                            ₹{cartItem.activePrice ?? cartItem.item.price} x {cartItem.quantity}
                           </p>
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '0.5rem' }}>
                             <div className="qty-pill-controller" style={{ height: '30px' }}>
@@ -2775,7 +2794,7 @@ export default function App() {
                     {/* Sub-filters slider for Active Orders queue */}
                     {orderQueue === 'active' && (
                       <div className="filter-slider" style={{ width: '100%', marginBottom: '0.75rem' }}>
-                        {['All Active', 'Pending', 'Preparing', 'Out for Delivery'].map(filter => (
+                        {['All Active', 'Preparing', 'Out for Delivery'].map(filter => (
                           <button
                             key={filter}
                             className={`filter-slider-btn ${activeStatusFilter === filter ? 'active' : ''}`}
