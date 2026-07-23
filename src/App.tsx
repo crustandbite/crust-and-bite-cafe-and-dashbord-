@@ -7,6 +7,14 @@ import {
 import {
   supabase
 } from './supabaseClient'
+import {
+  checkPushSupport,
+  getNotificationPermission,
+  requestNotificationPermission,
+  registerServiceWorker,
+  subscribeUserToPush,
+  saveSubscriptionToDatabase
+} from './pushNotifications'
 
 // --- MENU INTERFACES ---
 interface MenuItem {
@@ -324,6 +332,11 @@ export default function App() {
   const [adminSession, setAdminSession] = useState<any | null>(null)
   const [authError, setAuthError] = useState('')
   const [authLoading, setAuthLoading] = useState(false)
+
+  // --- ADMIN PUSH NOTIFICATION STATES ---
+  const [pushStatus, setPushStatus] = useState<NotificationPermission | 'unsupported'>('default')
+  const [registeringPush, setRegisteringPush] = useState(false)
+  const [pushError, setPushError] = useState<string | null>(null)
 
   // --- ADMIN DASHBOARD STATES ---
   const [orders, setOrders] = useState<SupabaseOrder[]>([])
@@ -741,6 +754,78 @@ export default function App() {
 
     return () => subscription.unsubscribe()
   }, [])
+
+  // Synchronize/Register push notifications when logged in as admin
+  useEffect(() => {
+    if (!adminSession) {
+      setPushError(null)
+      return
+    }
+
+    const initPush = async () => {
+      const support = checkPushSupport()
+      if (!support.supported) {
+        setPushStatus('unsupported')
+        return
+      }
+
+      const permission = getNotificationPermission()
+      setPushStatus(permission)
+
+      if (permission === 'granted') {
+        try {
+          const reg = await registerServiceWorker()
+          const vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
+          if (!vapidKey) {
+            console.warn('VITE_VAPID_PUBLIC_KEY is not configured.')
+            return
+          }
+          const sub = await subscribeUserToPush(reg, vapidKey)
+          await saveSubscriptionToDatabase(supabase, sub)
+        } catch (err: any) {
+          console.error('Failed to sync active push subscription:', err)
+        }
+      }
+    }
+
+    initPush()
+  }, [adminSession])
+
+  const handleEnablePushNotifications = async () => {
+    setPushError(null)
+    const support = checkPushSupport()
+    if (!support.supported) {
+      setPushStatus('unsupported')
+      return
+    }
+
+    const vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
+    if (!vapidKey) {
+      setPushError('Server configuration missing: public key not found.')
+      return
+    }
+
+    try {
+      setRegisteringPush(true)
+      const permission = await requestNotificationPermission()
+      setPushStatus(permission)
+
+      if (permission === 'granted') {
+        const reg = await registerServiceWorker()
+        const sub = await subscribeUserToPush(reg, vapidKey)
+        const res = await saveSubscriptionToDatabase(supabase, sub)
+        if (!res.success) {
+          throw new Error(res.error?.message || 'Database synchronization failed')
+        }
+      }
+    } catch (err: any) {
+      console.error('Error enabling push notifications:', err)
+      setPushError(err.message || 'Verification or registration failed. Please try again.')
+      setPushStatus(getNotificationPermission())
+    } finally {
+      setRegisteringPush(false)
+    }
+  }
 
   // Get active orders list (paginated, 20 items per page)
   const fetchOrders = async (reset = false) => {
@@ -2261,6 +2346,85 @@ export default function App() {
                   })}
                 </div>
               </header>
+
+              {/* Push Notifications Setup Card (Phase 3 Integration) */}
+              {pushStatus === 'default' && (
+                <div style={{
+                  background: 'var(--cb-surface)',
+                  border: '1px solid var(--cb-border)',
+                  borderRadius: '16px',
+                  padding: '1.25rem',
+                  marginBottom: '1.5rem',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '0.8rem',
+                  boxShadow: '0 4px 20px rgba(0, 0, 0, 0.2)'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '32px', height: '32px', borderRadius: '50%', background: 'var(--cb-orange-soft)', color: 'var(--cb-orange)' }}>
+                      <Bell size={16} />
+                    </div>
+                    <div>
+                      <h4 style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--cb-text)', margin: 0 }}>
+                        Enable Order Notifications
+                      </h4>
+                      <p style={{ fontSize: '0.75rem', color: 'var(--cb-text-secondary)', margin: '0.15rem 0 0 0', lineHeight: 1.3 }}>
+                        Get notified when a new order arrives, even when the dashboard is in the background.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={handleEnablePushNotifications}
+                    disabled={registeringPush}
+                    style={{
+                      width: '100%',
+                      padding: '0.6rem',
+                      borderRadius: '10px',
+                      background: 'linear-gradient(90deg, #FF5A0A 0%, #FF8A00 55%, #FFC21A 100%)',
+                      color: '#000',
+                      border: 'none',
+                      fontWeight: 700,
+                      fontSize: '0.8rem',
+                      cursor: registeringPush ? 'wait' : 'pointer',
+                      transition: 'all 0.2s ease',
+                      textAlign: 'center'
+                    }}
+                  >
+                    {registeringPush ? 'Enabling...' : 'Enable Notifications'}
+                  </button>
+                  {pushError && (
+                    <div style={{ fontSize: '0.72rem', color: 'var(--danger)', marginTop: '0.15rem' }}>
+                      {pushError}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {pushStatus === 'denied' && (
+                <div style={{
+                  background: 'var(--cb-surface)',
+                  border: '1px solid rgba(239, 68, 68, 0.25)',
+                  borderRadius: '16px',
+                  padding: '1.25rem',
+                  marginBottom: '1.5rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.75rem',
+                  boxShadow: '0 4px 20px rgba(0, 0, 0, 0.2)'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '32px', height: '32px', borderRadius: '50%', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', flexShrink: 0 }}>
+                    <X size={16} />
+                  </div>
+                  <div>
+                    <h4 style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--cb-text)', margin: 0 }}>
+                      Order Notifications Blocked
+                    </h4>
+                    <p style={{ fontSize: '0.75rem', color: 'var(--cb-text-secondary)', margin: '0.15rem 0 0 0', lineHeight: 1.3 }}>
+                      Notifications are blocked for this site. Enable them from your browser/site settings to receive background order alerts.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* DASHBOARD TAB VIEW */}
               {adminTab === 'dashboard' && (
