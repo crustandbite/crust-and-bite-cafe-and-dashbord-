@@ -719,7 +719,7 @@ export default function App() {
   // Webhook and connection integrations from build environment variables
   const n8nWebhookUrl = import.meta.env.VITE_N8N_WEBHOOK_URL || ''
 
-  // Sync state navigation with URL pathname / and /admin
+  // Sync state navigation with URL pathname / and /admin, and handle query parameters
   useEffect(() => {
     const handleUrlRouting = () => {
       const path = window.location.pathname
@@ -727,6 +727,11 @@ export default function App() {
         setView('customer')
       } else {
         setView('admin')
+      }
+
+      const params = new URLSearchParams(window.location.search)
+      if (params.get('adminTab') === 'orders') {
+        setAdminTab('orders')
       }
     }
     handleUrlRouting()
