@@ -86,64 +86,66 @@ self.addEventListener('fetch', function (event) {
 
 // 4. Push Event - Receive and Display Notification
 self.addEventListener('push', function (event) {
+  console.log('[Service Worker] Push Event Received.');
+
   if (!event.data) {
-    console.log('[Service Worker] Push event received with no data.');
+    console.warn('[Service Worker] Push event contains no payload data.');
     return;
   }
 
-  let payload = {};
+  let title = 'Crust & Bite';
+  let options = {};
+
   try {
-    payload = event.data.json();
+    const payload = event.data.json();
+    console.log('[Service Worker] Parsed push notification payload:', payload);
+
+    const orderId = payload.id || payload.orderId || 'General';
+    const totalAmount = payload.total || 0;
+
+    title = payload.title || 'Crust & Bite';
+    if (title === 'White House Cafe') {
+      title = 'Crust & Bite';
+    }
+
+    let bodyText = payload.body;
+    if (!bodyText) {
+      const customerName = payload.customerName || 'Guest';
+      const quantity = payload.itemQuantity || payload.quantity || payload.itemsCount || null;
+      bodyText = `New Order #${orderId}\nCustomer: ${customerName}`;
+      if (quantity) {
+        bodyText += `\nQuantity: ${quantity}`;
+      }
+      bodyText += `\nTotal: ₹${totalAmount}`;
+    }
+
+    options = {
+      body: bodyText,
+      icon: '/icons/icon-192.png',
+      badge: '/icons/badge-72.png',
+      tag: orderId ? `order-${orderId}` : 'new-order-general',
+      renotify: true,
+      requireInteraction: true,
+      data: {
+        orderId: orderId,
+        url: payload.url || '/?adminTab=orders' // Target URL
+      }
+    };
   } catch (err) {
-    console.error('[Service Worker] Failed to parse push data as JSON:', err);
-    return;
-  }
-
-  const orderId = payload.orderId;
-  const customerName = payload.customerName || 'Guest';
-  const total = payload.total || 0;
-  const orderStatus = payload.orderStatus || 'new';
-  const quantity = payload.itemQuantity || payload.quantity || payload.itemsCount || null;
-
-  // Only notify for legitimate active order statuses
-  if (!['new', 'pending', 'preparing', 'out_for_delivery'].includes(orderStatus.toLowerCase())) {
-    console.log('[Service Worker] Skipped status:', orderStatus);
-    return;
+    console.warn('[Service Worker] Payload is not JSON. Falling back to plain text parsing:', err);
+    options = {
+      body: event.data.text(),
+      icon: '/icons/icon-192.png',
+      badge: '/icons/badge-72.png',
+      tag: 'new-order-fallback',
+      data: {
+        url: '/?adminTab=orders'
+      }
+    };
   }
 
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (clientList) {
-      // Check if there is an active foreground window of the dashboard
-      const isClientVisible = clientList.some(function (client) {
-        return client.visibilityState === 'visible';
-      });
-
-      if (isClientVisible) {
-        console.log('[Service Worker] Dashboard is currently visible. Skipping background native alert.');
-        return;
-      }
-
-      // App is closed, backgrounded, or minimized; trigger native notification
-      const title = 'Crust & Bite';
-      
-      let body = `New Order #${orderId}\nCustomer: ${customerName}`;
-      if (quantity) {
-        body += `\nQuantity: ${quantity}`;
-      }
-      body += `\nTotal: ₹${total}`;
-
-      const options = {
-        body: body,
-        icon: '/icons/icon-192.png',
-        badge: '/icons/badge-72.png',
-        tag: `order-${orderId}`, // Unique tag per order to avoid collapsing
-        data: {
-          url: '/?adminTab=orders'
-        }
-      };
-
-      return self.registration.showNotification(title, options);
-    })
+    self.registration.showNotification(title, options)
   );
 });
 

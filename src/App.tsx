@@ -7,14 +7,7 @@ import {
 import {
   supabase
 } from './supabaseClient'
-import {
-  checkPushSupport,
-  getNotificationPermission,
-  requestNotificationPermission,
-  registerServiceWorker,
-  subscribeUserToPush,
-  saveSubscriptionToDatabase
-} from './pushNotifications'
+
 
 // --- MENU INTERFACES ---
 interface MenuItem {
@@ -294,7 +287,21 @@ const playChime = () => {
   }
 }
 
+// Helper to convert VAPID public key from URL-safe Base64 to Uint8Array
+function urlBase64ToUint8Array(base64String: string) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding)
+    .replace(/\-/g, '+')
+    .replace(/_/g, '/');
 
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
 
 export default function App() {
   // Navigation: 'customer' | 'admin'
@@ -337,9 +344,13 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(false)
 
   // --- ADMIN PUSH NOTIFICATION STATES ---
-  const [pushStatus, setPushStatus] = useState<NotificationPermission | 'unsupported'>('default')
-  const [registeringPush, setRegisteringPush] = useState(false)
-  const [pushError, setPushError] = useState<string | null>(null)
+  // Web Push subscription states
+  const [pushStatus, setPushStatus] = useState<'disabled' | 'enabled' | 'denied' | 'unsupported'>('disabled')
+  const [isSubscribing, setIsSubscribing] = useState(false)
+
+  // PWA Install states
+  const [installPromptEvent, setInstallPromptEvent] = useState<any>(null)
+  const [isStandalone, setIsStandalone] = useState(false)
 
   // --- ADMIN DASHBOARD STATES ---
   const [orders, setOrders] = useState<SupabaseOrder[]>([])
@@ -763,75 +774,171 @@ export default function App() {
     return () => subscription.unsubscribe()
   }, [])
 
-  // Synchronize/Register push notifications when logged in as admin
+  // Register Service Worker automatically on mount to enable PWA installation
   useEffect(() => {
-    if (!adminSession) {
-      setPushError(null)
-      return
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js')
+        .then(reg => console.log('PWA Service Worker registered on mount:', reg.scope))
+        .catch(err => console.error('PWA Service Worker registration failed on mount:', err))
+    }
+  }, [])
+
+  // Detect display mode and listen to beforeinstallprompt event for PWA installation
+  useEffect(() => {
+    const isStandaloneMode = window.matchMedia('(display-mode: standalone)').matches || (navigator as any).standalone
+    setIsStandalone(!!isStandaloneMode)
+
+    const handleInstallPrompt = (e: Event) => {
+      e.preventDefault()
+      setInstallPromptEvent(e)
+      console.log('beforeinstallprompt event fired and captured.')
     }
 
-    const initPush = async () => {
-      const support = checkPushSupport()
-      if (!support.supported) {
-        setPushStatus('unsupported')
-        return
-      }
+    window.addEventListener('beforeinstallprompt', handleInstallPrompt)
+    return () => window.removeEventListener('beforeinstallprompt', handleInstallPrompt)
+  }, [])
 
-      const permission = getNotificationPermission()
-      setPushStatus(permission)
-
-      if (permission === 'granted') {
-        try {
-          const reg = await registerServiceWorker()
-          const vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
-          if (!vapidKey) {
-            console.warn('VITE_VAPID_PUBLIC_KEY is not configured.')
-            return
-          }
-          const sub = await subscribeUserToPush(reg, vapidKey)
-          await saveSubscriptionToDatabase(supabase, sub)
-        } catch (err: any) {
-          console.error('Failed to sync active push subscription:', err)
-        }
-      }
+  const handleInstallApp = async () => {
+    if (!installPromptEvent) return
+    try {
+      installPromptEvent.prompt()
+      const { outcome } = await installPromptEvent.userChoice
+      console.log(`User response to the PWA install prompt: ${outcome}`)
+      setInstallPromptEvent(null)
+    } catch (err) {
+      console.error('Error handling PWA install prompt:', err)
     }
+  }
 
-    initPush()
-  }, [adminSession])
+  // Check subscription status when admin view is active
+  useEffect(() => {
+    if (view !== 'admin' || !adminSession) return
 
-  const handleEnablePushNotifications = async () => {
-    setPushError(null)
-    const support = checkPushSupport()
-    if (!support.supported) {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
       setPushStatus('unsupported')
       return
     }
 
-    const vapidKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
-    if (!vapidKey) {
-      setPushError('Server configuration missing: public key not found.')
+    if (Notification.permission === 'denied') {
+      setPushStatus('denied')
       return
     }
 
-    try {
-      setRegisteringPush(true)
-      const permission = await requestNotificationPermission()
-      setPushStatus(permission)
+    if (Notification.permission === 'default') {
+      setPushStatus('disabled')
+      return
+    }
 
-      if (permission === 'granted') {
-        const reg = await registerServiceWorker()
-        const sub = await subscribeUserToPush(reg, vapidKey)
-        const res = await saveSubscriptionToDatabase(supabase, sub)
-        if (!res.success) {
-          throw new Error(res.error?.message || 'Database synchronization failed')
+    // If permission is already granted, check if active push subscription exists in browser
+    navigator.serviceWorker.ready.then(async (registration) => {
+      try {
+        const subscription = await registration.pushManager.getSubscription()
+        if (subscription) {
+          setPushStatus('enabled')
+        } else {
+          setPushStatus('disabled')
         }
+      } catch (err) {
+        console.error('Error getting push subscription state:', err)
+        setPushStatus('disabled')
       }
+    })
+  }, [view, adminSession])
+
+  // Handle push notification registration
+  const handleSubscribePush = async () => {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+      alert('Push notifications are not supported on this browser/device.')
+      return
+    }
+
+    setIsSubscribing(true)
+
+    try {
+      // 1. Request notification permission from the user
+      const permission = await Notification.requestPermission()
+      if (permission === 'denied') {
+        setPushStatus('denied')
+        alert('Notification permission was denied. Please reset the site permissions in your browser address bar to enable notifications.')
+        return
+      }
+
+      if (permission !== 'granted') {
+        setPushStatus('disabled')
+        return
+      }
+
+      // 2. Register Service Worker explicitly
+      const registration = await navigator.serviceWorker.register('/sw.js')
+      console.log('Service Worker registered:', registration)
+
+      // Wait for service worker to be ready
+      const readyReg = await navigator.serviceWorker.ready
+
+      // 3. Get VAPID Public Key from environment
+      const vapidPublicKey = import.meta.env.VITE_VAPID_PUBLIC_KEY
+      if (!vapidPublicKey) {
+        throw new Error('VITE_VAPID_PUBLIC_KEY is not configured in env variables.')
+      }
+
+      const convertedVapidKey = urlBase64ToUint8Array(vapidPublicKey)
+
+      // 4. Subscribe the user via PushManager
+      const subscription = await readyReg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: convertedVapidKey
+      })
+
+      console.log('Successfully subscribed to Web Push:', subscription)
+
+      // 5. Parse cryptographic keys (p256dh and auth keys)
+      const rawKeys = subscription.toJSON().keys
+      const p256dh = rawKeys ? rawKeys.p256dh : ''
+      const auth = rawKeys ? rawKeys.auth : ''
+
+      if (!p256dh || !auth) {
+        throw new Error('PushSubscription keys are invalid or missing.')
+      }
+
+      // 6. Store push subscription in Supabase push_subscriptions table
+      const client = supabase
+      if (!client) throw new Error('Supabase client is not initialized.')
+
+      // Avoid duplicates: match by subscription endpoint
+      const { data: existingSubs, error: selectError } = await client
+        .from('push_subscriptions')
+        .select('*')
+        .eq('endpoint', subscription.endpoint)
+
+      if (selectError) throw selectError
+
+      if (existingSubs && existingSubs.length > 0) {
+        setPushStatus('enabled')
+        alert('Notifications enabled successfully!')
+        return
+      }
+
+      // Insert subscription record
+      const { error: insertError } = await client
+        .from('push_subscriptions')
+        .insert({
+          endpoint: subscription.endpoint,
+          keys: {
+            p256dh: p256dh,
+            auth: auth
+          },
+          user_id: adminSession?.user?.id || null
+        })
+
+      if (insertError) throw insertError
+
+      setPushStatus('enabled')
+      alert('Notifications enabled successfully! You will now receive background Web Push alerts for new orders.')
     } catch (err: any) {
-      console.error('Error enabling push notifications:', err)
-      setPushError(err.message || 'Verification or registration failed. Please try again.')
-      setPushStatus(getNotificationPermission())
+      console.error('Failed to subscribe to Web Push:', err)
+      alert('Failed to enable notifications: ' + err.message)
     } finally {
-      setRegisteringPush(false)
+      setIsSubscribing(false)
     }
   }
 
@@ -1722,10 +1829,15 @@ export default function App() {
           <header className="glass-header">
             <div className="container" style={{ height: '70px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 1.5rem', maxWidth: '1300px', margin: '0 auto' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <div style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '1.2rem', fontFamily: 'var(--font-serif)' }}>W</div>
+                <img
+                  src="/images/logo.png"
+                  alt="Crust & Bite Logo"
+                  style={{ height: '40px', width: 'auto', borderRadius: '8px', objectFit: 'contain' }}
+                  onError={(e) => { (e.target as HTMLElement).style.display = 'none' }}
+                />
                 <div>
-                  <h1 className="brand-title" style={{ fontSize: '1.1rem', letterSpacing: '0.05em' }}>White House</h1>
-                  <p style={{ fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--accent)', fontWeight: 'bold', marginTop: '-2px' }}>Cafe & Bistro</p>
+                  <h1 className="brand-title" style={{ fontSize: '1.1rem', letterSpacing: '0.05em' }}>Crust & Bite</h1>
+                  <p style={{ fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--accent)', fontWeight: 'bold', marginTop: '-2px' }}>Pizza & Bistro</p>
                 </div>
               </div>
               <div></div>
@@ -1777,7 +1889,7 @@ export default function App() {
               {/* 1. HERO SECTION (Zomato Banner style) */}
               <div className="hero-container">
                 <div className="hero-overlay-card">
-                  <h1 className="brand-title hero-title">White House Cafe</h1>
+                  <h1 className="brand-title hero-title">Crust & Bite</h1>
                   <div className="hero-badges-row">
                     <span className="hero-badge-pill rating"><Star size={12} fill="currentColor" /> 4.7 (2.1k)</span>
                     <span className="hero-badge-pill"><Clock size={12} /> 20–30 min</span>
@@ -1901,7 +2013,7 @@ export default function App() {
                               {item.popular && <span className="menu-item-popular-badge">★ Popular</span>}
                             </div>
                             <h3 className="menu-item-name">{item.name}</h3>
-                            <p className="menu-item-meta">{item.category} • White House Cafe</p>
+                            <p className="menu-item-meta">{item.category} • Crust & Bite</p>
                             <div className="menu-item-price">₹{item.price}</div>
                           </div>
 
@@ -2235,9 +2347,14 @@ export default function App() {
             <div className="login-container">
               <div className="login-card">
                 <div style={{ textAlign: 'center', marginBottom: '2rem' }}>
-                  <div style={{ width: '48px', height: '48px', borderRadius: '12px', backgroundColor: 'var(--accent)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '1.4rem', fontFamily: 'var(--font-serif)', marginBottom: '1rem' }}>W</div>
-                  <h2 className="brand-title" style={{ fontSize: '1.4rem', color: '#fff' }}>White House Cafe</h2>
-                  <p style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-secondary)' }}>Admin Control Panel</p>
+                  <img
+                    src="/images/logo.png"
+                    alt="Crust & Bite Logo"
+                    style={{ height: '48px', width: 'auto', borderRadius: '10px', objectFit: 'contain', marginBottom: '1rem' }}
+                    onError={(e) => { (e.target as HTMLElement).style.display = 'none' }}
+                  />
+                  <h2 className="brand-title" style={{ fontSize: '1.4rem', color: '#fff' }}>Crust & Bite</h2>
+                  <p style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-secondary)' }}>ADMIN CONTROL PANEL</p>
                 </div>
 
                 <form onSubmit={handleAdminLogin}>
@@ -2371,88 +2488,68 @@ export default function App() {
                 </div>
               </header>
 
-              {/* Push Notifications Setup Card (Phase 3 Integration) */}
-              {pushStatus === 'default' && (
-                <div style={{
-                  background: 'var(--cb-surface)',
-                  border: '1px solid var(--cb-border)',
-                  borderRadius: '16px',
-                  padding: '1.25rem',
-                  marginBottom: '1.5rem',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '0.8rem',
-                  boxShadow: '0 4px 20px rgba(0, 0, 0, 0.2)'
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '32px', height: '32px', borderRadius: '50%', background: 'var(--cb-orange-soft)', color: 'var(--cb-orange)' }}>
-                      <Bell size={16} />
-                    </div>
-                    <div>
-                      <h4 style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--cb-text)', margin: 0 }}>
-                        Enable Order Notifications
-                      </h4>
-                      <p style={{ fontSize: '0.75rem', color: 'var(--cb-text-secondary)', margin: '0.15rem 0 0 0', lineHeight: 1.3 }}>
-                        Get notified when a new order arrives, even when the dashboard is in the background.
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={handleEnablePushNotifications}
-                    disabled={registeringPush}
-                    style={{
-                      width: '100%',
-                      padding: '0.6rem',
-                      borderRadius: '10px',
-                      background: 'linear-gradient(90deg, #FF5A0A 0%, #FF8A00 55%, #FFC21A 100%)',
-                      color: '#000',
-                      border: 'none',
-                      fontWeight: 700,
-                      fontSize: '0.8rem',
-                      cursor: registeringPush ? 'wait' : 'pointer',
-                      transition: 'all 0.2s ease',
-                      textAlign: 'center'
-                    }}
-                  >
-                    {registeringPush ? 'Enabling...' : 'Enable Notifications'}
-                  </button>
-                  {pushError && (
-                    <div style={{ fontSize: '0.72rem', color: 'var(--danger)', marginTop: '0.15rem' }}>
-                      {pushError}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {pushStatus === 'denied' && (
-                <div style={{
-                  background: 'var(--cb-surface)',
-                  border: '1px solid rgba(239, 68, 68, 0.25)',
-                  borderRadius: '16px',
-                  padding: '1.25rem',
-                  marginBottom: '1.5rem',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.75rem',
-                  boxShadow: '0 4px 20px rgba(0, 0, 0, 0.2)'
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '32px', height: '32px', borderRadius: '50%', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', flexShrink: 0 }}>
-                    <X size={16} />
-                  </div>
-                  <div>
-                    <h4 style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--cb-text)', margin: 0 }}>
-                      Order Notifications Blocked
-                    </h4>
-                    <p style={{ fontSize: '0.75rem', color: 'var(--cb-text-secondary)', margin: '0.15rem 0 0 0', lineHeight: 1.3 }}>
-                      Notifications are blocked for this site. Enable them from your browser/site settings to receive background order alerts.
-                    </p>
-                  </div>
-                </div>
-              )}
-
               {/* DASHBOARD TAB VIEW */}
               {adminTab === 'dashboard' && (
                 <>
+                  {/* Enable Order Notifications Card */}
+                  <section className="order-glass-card" style={{ padding: '1.5rem', borderRadius: '16px', display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1.5rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                      <div style={{ width: '40px', height: '40px', borderRadius: '50%', backgroundColor: pushStatus === 'enabled' ? 'rgba(34, 197, 94, 0.1)' : 'rgba(220, 38, 38, 0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                        <Bell size={18} style={{ color: pushStatus === 'enabled' ? 'var(--success)' : 'var(--accent)' }} />
+                      </div>
+                      <div style={{ flex: 1, minWidth: '200px' }}>
+                        <h3 style={{ fontSize: '0.95rem', fontWeight: '700', color: 'var(--text-primary)', margin: 0 }}>Order Notifications</h3>
+                        <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.2rem', lineHeight: '1.4' }}>
+                          {pushStatus === 'enabled' ? 'Background Web Push is active. You will receive system alerts even if this tab is closed.' :
+                           pushStatus === 'denied' ? 'Notification permission is blocked by your browser settings. Please enable them in your address bar.' :
+                           pushStatus === 'unsupported' ? 'Push notifications are not supported in this browser.' :
+                           'Get notified when a new order arrives, even when the dashboard is closed or device is locked.'}
+                        </p>
+                      </div>
+                    </div>
+                    {pushStatus !== 'unsupported' && (
+                      <button 
+                        type="button"
+                        className="btn btn-primary" 
+                        style={{ 
+                          width: '100%', 
+                          marginTop: '0.5rem', 
+                          height: '40px', 
+                          borderRadius: '8px', 
+                          fontWeight: 'bold',
+                          backgroundColor: pushStatus === 'enabled' ? 'rgba(34, 197, 94, 0.1)' : 'var(--accent)',
+                          borderColor: pushStatus === 'enabled' ? 'rgba(34, 197, 94, 0.2)' : 'var(--accent)',
+                          color: pushStatus === 'enabled' ? 'var(--success)' : '#fff'
+                        }}
+                        disabled={pushStatus === 'enabled' || isSubscribing}
+                        onClick={handleSubscribePush}
+                      >
+                        {isSubscribing ? 'Registering...' :
+                         pushStatus === 'enabled' ? '● System Notifications Enabled' :
+                         pushStatus === 'denied' ? 'Permission Blocked' :
+                         'Enable Web Push Notifications'}
+                      </button>
+                    )}
+                    {!isStandalone && installPromptEvent && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ 
+                          width: '100%', 
+                          marginTop: '0.25rem', 
+                          height: '40px', 
+                          borderRadius: '8px', 
+                          fontWeight: 'bold', 
+                          backgroundColor: 'rgba(255, 255, 255, 0.05)', 
+                          color: '#fff', 
+                          border: '1px solid rgba(255, 255, 255, 0.1)' 
+                        }}
+                        onClick={handleInstallApp}
+                      >
+                        Install Crust & Bite App
+                      </button>
+                    )}
+                  </section>
                   {/* Dashboard Timeframe Filter Toggle */}
                   <div className="filter-slider" style={{ margin: '0 auto 1.5rem auto', padding: '0.2rem', borderRadius: '8px', background: 'rgba(255,255,255,0.02)', justifyContent: 'center', width: 'fit-content' }}>
                     {(['Daily', 'Weekly', 'Monthly'] as const).map(range => (
